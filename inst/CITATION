@@ -1,0 +1,22 @@
+citHeader("To cite ringSeg in publications use:")
+
+bibentry(
+  bibtype  = "Article",
+  title    = "Asymptotic Distribution-Free Change-Point Detection for Modern Data Based on a New Ranking Scheme",
+  author   = c(person("Doudou", "Zhou"), person("Hao", "Chen")),
+  journal  = "IEEE Transactions on Information Theory",
+  year     = "2025",
+  volume   = "71",
+  number   = "8",
+  pages    = "6183--6197",
+  month    = "August",
+  doi      = "10.1109/TIT.2025.3575858",
+  note     = "Date of publication: 02 June 2025",
+  textVersion = paste(
+    "Doudou Zhou and Hao Chen (2025).",
+    "Asymptotic Distribution-Free Change-Point Detection for Modern Data",
+    "Based on a New Ranking Scheme.",
+    "IEEE Transactions on Information Theory, 71(8), 6183-6197.",
+    "doi:10.1109/TIT.2025.3575858."
+  )
+)

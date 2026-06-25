@@ -1,0 +1,6 @@
+# Hand-written (roxygen2 not used in build environment).
+export(ring_cpd)
+export(ring_graph)
+export(rcpd)
+export(Rise_Rank)
+importFrom(stats, dnorm, pnorm, integrate, dchisq, dist)

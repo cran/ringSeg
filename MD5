@@ -1,0 +1,14 @@
+e55496af52d55a249d301ffd369c439c *DESCRIPTION
+57aa470927b68915152d7307893cb27b *NAMESPACE
+41f9b797452b15c09c0bfafaec7bcda0 *NEWS.md
+07d37a8da9eabd18bd42b5b941bc8d80 *R/RING-core.R
+8d90980cf50f15ec1a45629847828cf7 *R/ringSeg-package.R
+795cad982ea3b2832704a153295c5eda *README.md
+f61db891eb928123aba4412ca322f508 *build/partial.rdb
+ffc011677acf99a065c3760793dac7c4 *inst/CITATION
+932df0547b86bc03eaee019641e2c81c *man/Rise_Rank.Rd
+196003d4ce87bbf74505cddb49a4b948 *man/rcpd.Rd
+442a1a7b409c06c1188f216eb9bb2c9a *man/ringSeg-package.Rd
+1a8321f8e3a231d736871ad4e9b12309 *man/ring_cpd.Rd
+8d1551203e510496266b759b276065a6 *man/ring_graph.Rd
+a40fb1eacefb15578cecf74a7db10c33 *tests/test-ringSeg.R
