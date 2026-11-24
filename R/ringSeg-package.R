@@ -20,8 +20,11 @@
 #'
 #' Constructs the sparse, rank-based k-nearest-neighbour graph that the RING
 #' statistics operate on -- RING's ranking scheme: rank each observation's
-#' neighbours within its row of the similarity \eqn{S = \max(D) - D}, keep the
-#' \code{k} nearest (weights \code{k}..1 from nearest to k-th), and symmetrize.
+#' neighbours by increasing distance, give the \code{k} nearest weights
+#' \code{k}..1 when distances are distinct, and symmetrize. Tied distances
+#' share the mean of the weights at their positions, including zero weight
+#' for positions beyond \code{k}. A tie at the cutoff can retain more than
+#' \code{k} neighbours without changing the total outgoing rank weight.
 #'
 #' @param D an \eqn{n \times n} distance matrix.
 #' @param k number of nearest neighbours (default \code{round(n^0.65)}, a value in
@@ -54,10 +57,19 @@ ring_graph <- function(D, k = NULL) {
     warning("'k' rounded to the nearest integer (", round(k), ").")
     k <- round(k)
   }
-  S <- max(D) - D                                  # similarity (rank-equiv to -D)
-  Rrow <- Rise_Rank(S, method = "row")             # 0..n-1 row ranks (self lowest)
-  R <- Rrow - n + 1 + k                             # keep top-k: weights k..1, else <=0
-  R[R < 0] <- 0
+  R <- matrix(0, n, n, dimnames = dimnames(D))
+  neighbors <- seq_len(n)
+  for (i in neighbors) {
+    j <- neighbors[-i]
+    sorted <- order(D[i, j])
+    tie_sizes <- rle(D[i, j[sorted]])$lengths
+    last <- cumsum(tie_sizes)
+    first <- last - tie_sizes + 1
+    # Average k, ..., 1, 0, ... across the entire tie group.
+    count <- pmax(0, pmin(last, k) - first + 1)
+    weight <- count * (2 * (k - first + 1) - count + 1) / (2 * tie_sizes)
+    R[i, j[sorted]] <- rep.int(weight, tie_sizes)
+  }
   R <- R + t(R)
   diag(R) <- 0
   R
@@ -91,7 +103,8 @@ ring_graph <- function(D, k = NULL) {
 #'
 #' @return A list with \code{scanZ} (the WR/MR/TR statistics and estimated
 #'   change-point(s)), and, as requested, \code{pval.appr} and \code{pval.perm}.
-#'   See \code{\link{rcpd}}.
+#'   For a changed interval, \code{tau = c(i, j)} identifies rows
+#'   \code{(i + 1):j}. See \code{\link{rcpd}}.
 #'
 #' @references Zhou, D. and Chen, H. (2025). Asymptotic Distribution-Free
 #'   Change-Point Detection for Modern Data Based on a New Ranking Scheme.
@@ -114,6 +127,11 @@ ring_cpd <- function(x, is.distance = FALSE, is.rank = FALSE, k = NULL,
                      n0 = NULL, n1 = NULL, pval.appr = TRUE, skew.corr = TRUE,
                      B = 0, alternative = c("single", "interval")) {
   alternative <- match.arg(alternative)
+  if (!is.logical(is.rank) || length(is.rank) != 1L || is.na(is.rank) ||
+      !is.logical(is.distance) || length(is.distance) != 1L || is.na(is.distance)) {
+    stop("'is.rank' and 'is.distance' must each be TRUE or FALSE.")
+  }
+  if (is.rank && is.distance) stop("Choose either 'is.rank' or 'is.distance'.")
   if (is.rank) {
     R <- as.matrix(x)
   } else {

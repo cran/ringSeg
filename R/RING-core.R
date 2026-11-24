@@ -43,7 +43,7 @@ Uscan.interval <- function(n, Ebynode, sumR, sumRi){
     U0[i,j] = 2*sumRi[j]
     U2[i,j] = sumR - 2*sumRi[j]
     
-    for (j in min((i+2),n):n){
+    for (j in seq.int(i+1L,n)[-1L]){
       g[j] = 1 # update g
 
       links = Ebynode[[j]][['node']]
@@ -77,7 +77,7 @@ rcpd<-function(R, n0=NULL, n1=NULL, pval.appr=TRUE, skew.corr=TRUE, B=0, alterna
   if(!is.logical(skew.corr) || length(skew.corr) != 1L || is.na(skew.corr)){
     stop("'skew.corr' must be a single TRUE or FALSE.")
   }
-  if(length(B) != 1L || is.na(B) || B < 0 || B != floor(B)){
+  if(length(B) != 1L || !is.numeric(B) || !is.finite(B) || B < 0 || B != floor(B)){
     stop("'B' must be a single non-negative integer.")
   }
   R = as.matrix(R)
@@ -93,16 +93,31 @@ rcpd<-function(R, n0=NULL, n1=NULL, pval.appr=TRUE, skew.corr=TRUE, B=0, alterna
   if(any(diag(R) != 0)){
     stop("'R' must have a zero diagonal.")
   }
-  if(!isTRUE(all.equal(R, t(R)))){
-    warning("'R' is not symmetric; symmetrized as (R + t(R))/2.")
-    R = (R + t(R))/2
+  if(any(R != t(R))){
+    if(!isTRUE(all.equal(R, t(R)))){
+      warning("'R' is not symmetric; symmetrized as (R + t(R))/2.")
+    }
+    R = R/2 + t(R)/2
   }
-  if(sum(R) == 0){
+  scale = max(R)
+  if(scale == 0){
     stop("'R' is empty (all entries zero); no edges to scan. Check the graph / k.")
   }
   n = nrow(R)
   if(n < 4){
     stop("RING change-point detection needs at least 4 observations (got n = ", n, ").")
+  }
+  # Adding a constant to all off-diagonal weights adds a deterministic
+  # term at each split size. Remove a large common offset before summing.
+  offset = min(R[upper.tri(R)])
+  spread = scale-offset
+  if(spread > 0 && spread <= 1e-3*scale){
+    diag(R) = offset
+    # Binary scaling preserves the represented differences and exact ties.
+    R = (R-offset)/2^floor(log2(spread))
+  }else if(scale < 1e-50 || scale > 1e50){
+    # Protect products of up to three weights at extreme magnitudes.
+    R = R/scale
   }
   if(!is.null(n0)){
     if(length(n0) != 1L || !is.numeric(n0) || !is.finite(n0))
@@ -157,22 +172,83 @@ rcpd<-function(R, n0=NULL, n1=NULL, pval.appr=TRUE, skew.corr=TRUE, B=0, alterna
   r0 = sumR/(n*(n-1)); rd = sqrt(sumR2/(n*(n-1)))
   r1 = sqrt( mean(sumRi^2)/(n-1)^2)
   
+  var.w = (n-2)*rd^2 - 2*(n-1)*r1^2 + n*r0^2
+  var.diff = r1^2 - r0^2
+  # Recompute close to zero using sums of squares to avoid cancellation.
+  eps = 32*.Machine$double.eps
+  if(var.diff <= eps*r1^2){
+    var.diff = mean((sumRi - mean(sumRi))^2)/(n-1)^2
+  }
+  if(var.w <= eps*n*rd^2){
+    row.effect = (sumRi - mean(sumRi))/(n-2)
+    residual = R - r0 - outer(row.effect,row.effect,"+")
+    diag(residual) = 0
+    residual[abs(residual) <= eps*max(R)] = 0
+    var.w = (n-2)*sum(residual^2)/(n*(n-1))
+  }
+
   tt = 1:(n-1)
   muw = n*( tt-1 )*( n - tt-1 )*r0/(n-2)
   mudiff = (n-1)*( 2*tt - n)*r0
-  sd_w = sqrt( 2*tt*( tt-1 )*(n - tt)*( n - tt-1 )*(  (n-2)*rd^2 - 2*(n-1)*r1^2 + n*r0^2)/( (n-2)^2*(n-3)) )
-  sd_diff = sqrt( 4*(n-1)*tt*(n - tt)*(r1^2 - r0^2) )
-  
+  sd_w = sqrt( 2*tt*( tt-1 )*(n - tt)*( n - tt-1 )*var.w/( (n-2)^2*(n-3)) )
+  sd_diff = sqrt( 4*(n-1)*tt*(n - tt)*var.diff )
+  score = function(U, indices, sizes){
+    Zw = if(var.w == 0) rep(0,length(indices)) else (U$Uw[indices]-muw[sizes])/sd_w[sizes]
+    Zdiff = if(var.diff == 0) rep(0,length(indices)) else (U$Udiff[indices]-mudiff[sizes])/sd_diff[sizes]
+    list(TR=Zdiff^2 + Zw^2, MR=pmax(abs(Zdiff),Zw), WR=Zw)
+  }
+
+  permutation_p = function(permuted, observed){
+    # Different addition orders can move an exact tie by a few ulps.
+    tolerance = 32*.Machine$double.eps*max(1,abs(observed))
+    (sum(permuted >= observed-tolerance)+1)/(B+1)
+  }
+
+  analytic = function(scanZ){
+    out = list(TR=NA_real_, MR=NA_real_, WR=NA_real_)
+    if(skew.corr){
+      out$MR.cor = NA_real_
+      out$WR.cor = NA_real_
+    }
+    if(n0 == n1 || var.w == 0 || var.diff == 0){
+      warning("Analytic p-values are unavailable for a fixed scan bound or zero null variance; use B > 0 for permutation p-values.")
+      return(out)
+    }
+
+    # The leading factors of the large-threshold approximations peak at
+    # these values. Use only the upper side of those factors.
+    minimum = if(alternative == "single") c(2,1,1) else c(4,sqrt(3),sqrt(3))
+    observed = c(scanZ$TR$TR.max,scanZ$MR$MR.max,scanZ$WR$WR.max)
+    eligible = observed >= minimum
+    if(any(!eligible)){
+      omitted = paste(names(out)[seq_along(eligible)][!eligible],collapse=", ")
+      warning("Scan maximum below the analytic tail range for ",omitted,
+              "; returning NA. Use B > 0 for permutation p-values.")
+    }
+    if(any(eligible)){
+      statistics = c("generalized","max","weighted")[eligible]
+      correct = skew.corr && n>=6 && any(eligible[-1L])
+      if(alternative == "single"){
+        values = pASingle(R,scanZ,Ebynode,statistics=statistics,skew.corr=correct,n0=n0,n1=n1)
+      }else{
+        values = pAInterval(R,scanZ,Ebynode,statistics=statistics,skew.corr=correct,l0=n0,l1=n1)
+      }
+      out[names(values)] = values
+    }
+    if(skew.corr && n<6){
+      warning("Skewness-corrected p-values require at least six observations; use B > 0 for permutation p-values.")
+    }
+    out
+  }
   scanZ = list()
   
   if(alternative=='single'){
     U = Uscan.point(n, Ebynode, sumR,sumRi)
-    Uw = U$Uw
-    Udiff = U$Udiff
-    
-    Zw = (Uw-muw)/sd_w
-    Zdiff = (Udiff-mudiff)/sd_diff
-    TR = Zdiff^2 + Zw^2; MR = pmax(abs(Zdiff),Zw); WR = Zw
+    valid.sizes = 2:(n-2)
+    scores = score(U,valid.sizes,valid.sizes)
+    TR = c(NA_real_,scores$TR,NA_real_)
+    MR = c(NA_real_,scores$MR,NA_real_)
+    WR = c(NA_real_,scores$WR,NA_real_)
     
     #Time interval
     T0 = n0:n1
@@ -191,11 +267,14 @@ rcpd<-function(R, n0=NULL, n1=NULL, pval.appr=TRUE, skew.corr=TRUE, B=0, alterna
     scanZ$WR$WR.max = WR[T0][id0]
     scanZ$WR$WR = WR
     
+    if(var.w == 0) scanZ$WR$tau = NA_integer_
+    if(var.w == 0 && var.diff == 0){
+      scanZ$TR$tau = scanZ$MR$tau = NA_integer_
+    }
     res$scanZ = scanZ
     
     if(pval.appr==TRUE){
-      p.appr = pASingle(R, scanZ, Ebynode,skew.corr=skew.corr,n0=n0,n1=n1)
-      res$pval.appr = p.appr
+      res$pval.appr = analytic(scanZ)
     }
     if(B>0){
       permmatch = rep(0,n)
@@ -207,19 +286,12 @@ rcpd<-function(R, n0=NULL, n1=NULL, pval.appr=TRUE, skew.corr=TRUE, B=0, alterna
           list('node'= perm[oldlinks],'weight'=Ebynode[[permmatch[i]]][['weight']])
         })
         Ub = Uscan.point(n,Ebnstar,sumR,sumRi[permmatch])
-        Uw.b = Ub$Uw[T0]
-        Udiff.b = Ub$Udiff[T0]
-        
-        Zw.b = ( Uw.b - muw[T0])/sd_w[T0]
-        Zdiff.b = (Udiff.b - mudiff[T0])/sd_diff[T0]
-        TR.b = Zdiff.b^2 + Zw.b^2
-        MR.b = pmax(abs(Zdiff.b),Zw.b)
-        c(max(TR.b),max(MR.b),max(Zw.b))
+        unname(vapply(score(Ub,T0,T0),max,numeric(1)))
       })
       
-      res$pval.perm = list('TR'=(sum(Z.B[1,]>=scanZ$TR$TR.max)+1)/(B+1),
-                           'MR'=(sum(Z.B[2,]>=scanZ$MR$MR.max)+1)/(B+1),
-                           'WR'=(sum(Z.B[3,]>=scanZ$WR$WR.max)+1)/(B+1))
+      res$pval.perm = list('TR'=permutation_p(Z.B[1,],scanZ$TR$TR.max),
+                           'MR'=permutation_p(Z.B[2,],scanZ$MR$MR.max),
+                           'WR'=permutation_p(Z.B[3,],scanZ$WR$WR.max))
       res$perm.dat = list('TR'=Z.B[1,],
                           'MR'=Z.B[2,],
                           'WR'=Z.B[3,])
@@ -229,42 +301,27 @@ rcpd<-function(R, n0=NULL, n1=NULL, pval.appr=TRUE, skew.corr=TRUE, B=0, alterna
   if(alternative=='interval'){
     l0 = n0; l1 = n1
     U = Uscan.interval(n, Ebynode, sumR, sumRi)
-    Uw = U$Uw
-    Udiff = U$Udiff
-    
-    dif = matrix(1:n,nrow=n,ncol=n,byrow = TRUE)-matrix(1:n,nrow=n,ncol=n)
-    dif = dif[upper.tri(dif)]
-    ids = which((dif>=l0) & (dif<=l1))
-    
-    Zw = Zdiff = TR = MR = rep(0,length(Uw))
-    Zw[ids] = (Uw[ids]-muw[dif[ids]])/sd_w[dif[ids]]
-    Zdiff[ids] = (Udiff[ids]-mudiff[dif[ids]])/sd_diff[dif[ids]]
-    MR[ids] = pmax(Zw[ids],abs(Zdiff[ids]))
-    TR[ids] = Zw[ids]^2 + Zdiff[ids]^2
-    
-    tau0 = which.max(TR)
-    j=ceiling((1+sqrt(1+8*tau0))/2)
-    i=tau0 - (j-1)*(j-2)/2
-    scanZ$TR$tau = c(i, j)
-    scanZ$TR$TR.max = TR[tau0]
-    
-    tau0 = which.max(MR)
-    j=ceiling((1+sqrt(1+8*tau0))/2)
-    i=tau0 - (j-1)*(j-2)/2
-    scanZ$MR$tau = c(i, j)
-    scanZ$MR$MR.max = MR[tau0]
-    
-    tau0 = which.max(Zw)
-    j=ceiling((1+sqrt(1+8*tau0))/2)
-    i=tau0 - (j-1)*(j-2)/2
-    scanZ$WR$tau = c(i, j)
-    scanZ$WR$WR.max = Zw[tau0]
-    
+    candidates = which(upper.tri(R),arr.ind=TRUE)
+    dif = candidates[,2]-candidates[,1]
+    ids = which(dif>=l0 & dif<=l1)
+
+    scores = score(U,ids,dif[ids])
+    scanZ = lapply(names(scores),function(statistic){
+      values = scores[[statistic]]
+      best = which.max(values)
+      result = list(tau=as.numeric(candidates[ids[best],]))
+      result[[paste0(statistic,".max")]] = values[best]
+      result
+    })
+    names(scanZ) = names(scores)
+    if(var.w == 0) scanZ$WR$tau = rep(NA_integer_,2L)
+    if(var.w == 0 && var.diff == 0){
+      scanZ$TR$tau = scanZ$MR$tau = rep(NA_integer_,2L)
+    }
     res$scanZ = scanZ
-    
+
     if(pval.appr==TRUE){
-      p.appr = pAInterval(R, scanZ, Ebynode,skew.corr=skew.corr,l0=l0,l1=l1)
-      res$pval.appr = p.appr
+      res$pval.appr = analytic(scanZ)
     }
     if(B>0){
       permmatch = rep(0,n)
@@ -276,21 +333,12 @@ rcpd<-function(R, n0=NULL, n1=NULL, pval.appr=TRUE, skew.corr=TRUE, B=0, alterna
           list('node'= perm[oldlinks],'weight'=Ebynode[[permmatch[i]]][['weight']])
         })
         Ub = Uscan.interval(n,Ebnstar,sumR,sumRi[permmatch])
-        Uw.b = Ub$Uw
-        Udiff.b = Ub$Udiff
-        
-        Zw.b = (Uw.b[ids]-muw[dif[ids]])/sd_w[dif[ids]]
-        Zdiff.b = (Udiff.b[ids]-mudiff[dif[ids]])/sd_diff[dif[ids]]
-        TR.b = Zw.b^2 + Zdiff.b^2
-        Zw.b.max = max(Zw.b)
-        Zdiff.b.max = max(abs(Zdiff.b))
-        
-        c(max(TR.b),max(Zw.b.max,Zdiff.b.max),Zw.b.max)
+        unname(vapply(score(Ub,ids,dif[ids]),max,numeric(1)))
       })
       
-      res$pval.perm = list('TR'=(sum(Z.B[1,]>=scanZ$TR$TR.max)+1)/(B+1),
-                           'MR'=(sum(Z.B[2,]>=scanZ$MR$MR.max)+1)/(B+1),
-                           'WR'=(sum(Z.B[3,]>=scanZ$WR$WR.max)+1)/(B+1))
+      res$pval.perm = list('TR'=permutation_p(Z.B[1,],scanZ$TR$TR.max),
+                           'MR'=permutation_p(Z.B[2,],scanZ$MR$MR.max),
+                           'WR'=permutation_p(Z.B[3,],scanZ$WR$WR.max))
       res$perm.dat = list('TR'=Z.B[1,],
                           'MR'=Z.B[2,],
                           'WR'=Z.B[3,])
@@ -401,7 +449,7 @@ pMR1 = function(b, n, n0=ceiling(0.05*n), n1=floor(0.95*n)){
   if (b>0){
     pval.w = pWR1(b,n,n0,n1)
     pval.diff = pDR1(b,n,n0,n1)
-    pval.max.type = 1-(1-pval.w)*(1-pval.diff)
+    pval.max.type = pval.w + (1-pval.w)*pval.diff
     return(pval.max.type)
   }else{
     return(1)
@@ -412,7 +460,7 @@ pMR2 = function(b, n, l0=ceiling(0.05*n), l1=floor(0.95*n)){
   if (b>0){
     pval.w = pWR2(b,n,l0,l1)
     pval.diff = pDR2(b,n,l0,l1)
-    pval.max.type = 1-(1-pval.w)*(1-pval.diff)
+    pval.max.type = pval.w + (1-pval.w)*pval.diff
     return(pval.max.type)
   }else{
     return(1)
@@ -449,21 +497,19 @@ pASingle <- function(R, scanZ, Ebynode, statistics="all", skew.corr=FALSE, n0=NU
     TI = 1:(n-1)
 
     ### Calculate the corrected p-value for Zw ###
-    r = EZw3
-    x = rho_one_Rw(n,TI)
-    x[is.infinite(x)] = 0
-    b = scanZ$WR$WR.max
-    p.w.corr = pS_correct_w(n,b,r,x,n0,n1)
+    x.w = rho_one_Rw(n,TI)
+    x.w[is.infinite(x.w)] = 0
     if (length(which(!is.na(match(c("m","max","all"), statistics))))>0){
+      # Use the observed max-type threshold for both component tails.
       b = scanZ$MR$MR.max
-      x = n/(2*TI*(n - TI))
-      r = EZdiff3
-      p.diff.corr = pS_correct_diff(n,b,r,x,n0,n1)
-      output$MR.cor = 1 - (1-p.w.corr)*(1-p.diff.corr)
+      p.w.corr = pS_correct_w(n,b,EZw3,x.w,n0,n1)
+      x.diff = n/(2*TI*(n - TI))
+      p.diff.corr = pS_correct_diff(n,b,EZdiff3,x.diff,n0,n1)
+      output$MR.cor = p.w.corr + (1-p.w.corr)*p.diff.corr
     }
-
     if (length(which(!is.na(match(c("w","weighted","all"), statistics))))>0){
-      output$WR.cor = p.w.corr
+      b = scanZ$WR$WR.max
+      output$WR.cor = pS_correct_w(n,b,EZw3,x.w,n0,n1)
     }
   }
   return(output)
@@ -493,21 +539,19 @@ pAInterval <- function(R, scanZ, Ebynode, statistics="all", skew.corr=FALSE, l0=
     TI = 1:(n-1)
 
     ### Calculate the corrected p-value for Zw ###
-    r = EZw3
-    x = rho_one_Rw(n,TI)
-    x[is.infinite(x)] = 0
-    b = scanZ$WR$WR.max
-    p.w.corr = pI_correct_w(n,b,r,x,l0,l1)
+    x.w = rho_one_Rw(n,TI)
+    x.w[is.infinite(x.w)] = 0
     if (length(which(!is.na(match(c("m","max","all"), statistics))))>0){
+      # Use the observed max-type threshold for both component tails.
       b = scanZ$MR$MR.max
-      x = n/(2*TI*(n - TI))
-      r = EZdiff3
-      p.diff.corr = pI_correct_diff(n,b,r,x,l0,l1)
-      output$MR.cor = 1 - (1-p.w.corr)*(1-p.diff.corr)
+      p.w.corr = pI_correct_w(n,b,EZw3,x.w,l0,l1)
+      x.diff = n/(2*TI*(n - TI))
+      p.diff.corr = pI_correct_diff(n,b,EZdiff3,x.diff,l0,l1)
+      output$MR.cor = p.w.corr + (1-p.w.corr)*p.diff.corr
     }
-
     if (length(which(!is.na(match(c("w","weighted","all"), statistics))))>0){
-      output$WR.cor = p.w.corr
+      b = scanZ$WR$WR.max
+      output$WR.cor = pI_correct_w(n,b,EZw3,x.w,l0,l1)
     }
   }
   return(output)
@@ -516,13 +560,17 @@ pAInterval <- function(R, scanZ, Ebynode, statistics="all", skew.corr=FALSE, l0=
 
 ##Calculate the corrected p-value for Zdiff
 pS_correct_diff <- function(n,b,r,x,n0,n1){
-  if (b<0){
+  if (b<=0){
     return(1)
   }
-  theta_b = rep(0,n-1)
+  fallback = function(){
+    message("Zdiff: p-value approximation without skewness correction is reported.")
+    pDR1(b,n,n0,n1)
+  }
+  theta_b = rep(NA_real_,n-1)
   pos = which(1+2*r*b>0)
-  theta_b[pos] = (sqrt((1+2*r*b)[pos])-1)/r[pos]
-  theta_b[is.na(theta_b)] = 0
+  # Rationalized root remains well-defined and accurate as skewness tends to zero.
+  theta_b[pos] = 2*b/(1+sqrt((1+2*r*b)[pos]))
   ratio = exp((b-theta_b)^2/2 + r*theta_b^3/6)/sqrt(1+r*theta_b)
   a = x*Nu(sqrt(2*b^2*x)) * ratio
   
@@ -540,6 +588,10 @@ pS_correct_diff <- function(n,b,r,x,n0,n1){
     id1 = which.max(dif)
     id2 = id1 + ceiling(0.03*n)
     id3 = id2 + ceiling(0.09*n)
+    if(id2+1L > length(a) || id3 > length(a) ||
+       any(!is.finite(a[c(id2,id2+1L,id3)]))){
+      return(fallback())
+    }
     inc = (a[id3]-a[id2])/(id3-id2)
     a[id2:1] = a[id2+1]-inc*(1:id2)
   }
@@ -549,6 +601,10 @@ pS_correct_diff <- function(n,b,r,x,n0,n1){
     id1 = min(neg+ceiling(n/2)-1,ceiling(n/2)-1)
     id2 = id1 - ceiling(0.03*n)
     id3 = id2 - ceiling(0.09*n)
+    if(id3 < 1L || id2 < 2L || id2 > length(ratio) ||
+       any(!is.finite(ratio[c(id3,id2-1L,id2)]))){
+      return(fallback())
+    }
     inc = (ratio[id3]-ratio[id2])/(id3-id2)
     ratio[id2:(n-1)] = ratio[id2-1]+inc*((id2:(n-1))-id2)
     ratio[ratio<0]=0
@@ -556,29 +612,35 @@ pS_correct_diff <- function(n,b,r,x,n0,n1){
   }
   neg2 = which(a<0)
   a[neg2] = 0
+  if(any(!is.finite(a[n0:n1]))){
+    return(fallback())
+  }
   integrand = function(s){
     a[s]
   }
-  result = try(2*dnorm(b)*b*integrate(integrand, n0, n1, subdivisions=3000, stop.on.error=FALSE)$value, silent=T)
-  if(result>1){
-    message('Zdiff after correction has p-value larger than 1. Set as the p-value without correction.')
-    result = pDR1(b, n, n0, n1)
+  result = tryCatch(2*dnorm(b)*b*integrate(integrand, n0, n1, subdivisions=3000, stop.on.error=FALSE)$value,
+                    error=function(e) NA_real_)
+  if(!is.finite(result) || result < 0 || result > 1){
+    return(fallback())
   }
   return(result)
 }
 
 ##Calculate the corrected p-value for Zw
 pS_correct_w <- function(n,b,r,x,n0,n1){
-  if (b<0){
+  if (b<=0){
     return(1)
   }
-  theta_b = rep(0,n-1)
+  fallback = function(){
+    message("Zw: p-value approximation without skewness correction is reported.")
+    pWR1(b,n,n0,n1)
+  }
+  theta_b = rep(NA_real_,n-1)
   pos = which(1+2*r*b>0)
-  theta_b[pos] = (sqrt((1+2*r*b)[pos])-1)/r[pos]
+  theta_b[pos] = 2*b/(1+sqrt((1+2*r*b)[pos]))
   ratio = exp((b-theta_b)^2/2 + r*theta_b^3/6)/sqrt(1+r*theta_b)
   a = x*Nu(sqrt(2*b^2*x)) * ratio
-  a_na = which(is.na(a)==TRUE )
-  a[a_na] = 0
+  a[which(x==0)] = 0
   nn = n-1-length(pos)
   if (nn>0.75*n){
     message("Extrapolation of Zw for skewness-corrected p-value approximation could not be performed.")
@@ -587,36 +649,49 @@ pS_correct_w <- function(n,b,r,x,n0,n1){
   if (nn>=(n0-1)+(n-n1)){
     message(paste0('Zw: nn>=(n0-1)+(n-n1), b:',b,'.'))
     neg = which(1+2*r*b<=0)
-    dif = neg[2:nn]-neg[1:(nn-1)]
+    if(length(neg) < 2L){
+      return(fallback())
+    }
+    dif = diff(neg)
     id1 = which.max(dif)
     id2 = id1 + ceiling(0.03*n)
     id3 = id2 + ceiling(0.09*n)
+    if(id2+1L > length(a) || id3 > length(a) ||
+       any(!is.finite(a[c(id2,id2+1L,id3)]))){
+      return(fallback())
+    }
     inc = (a[id3]-a[id2])/(id3-id2)
     a[id2:1] = a[id2+1]-inc*(1:id2)
     a[(n/2+1):n] = a[(n/2):1]
-    neg2 = which(a<0 | is.na(a)==TRUE)
+    neg2 = which(a<0)
     a[neg2] = 0
+  }
+  if(any(!is.finite(a[n0:n1]))){
+    return(fallback())
   }
   integrand = function(s){
     a[s]
   }
-  result = try(dnorm(b)*b*integrate(integrand, n0, n1, subdivisions=3000, stop.on.error=FALSE)$value, silent=T)
-  if(result>1){
-    message('Zw after correction has p-value larger than 1. Set as the p-value without correction.')
-    result = pWR1(b, n, n0, n1)
+  result = tryCatch(dnorm(b)*b*integrate(integrand, n0, n1, subdivisions=3000, stop.on.error=FALSE)$value,
+                    error=function(e) NA_real_)
+  if(!is.finite(result) || result < 0 || result > 1){
+    return(fallback())
   }
   return(result)
 }
 
 ##Calculate the corrected p-value for Zdiff
 pI_correct_diff <- function(n,b,r,x,l0,l1){
-  if (b<0){
+  if (b<=0){
     return(1)
   }
-  theta_b = rep(0,n-1)
+  fallback = function(){
+    message("Zdiff: p-value approximation without skewness correction is reported.")
+    pDR2(b,n,l0,l1)
+  }
+  theta_b = rep(NA_real_,n-1)
   pos = which(1+2*r*b>0)
-  theta_b[pos] = (sqrt((1+2*r*b)[pos])-1)/r[pos]
-  theta_b[is.na(theta_b)] = 0
+  theta_b[pos] = 2*b/(1+sqrt((1+2*r*b)[pos]))
   ratio = exp((b-theta_b)^2/2 + r*theta_b^3/6)/sqrt(1+r*theta_b)
   a = (b^2*x*Nu(sqrt(2*b^2*x)))^2 * ratio  ## this is different from single change-point alternative
   
@@ -634,46 +709,61 @@ pI_correct_diff <- function(n,b,r,x,l0,l1){
     id1 = which.max(dif)
     id2 = id1 + ceiling(0.03*n)
     id3 = id2 + ceiling(0.09*n)
+    if(id2+1L > length(a) || id3 > length(a) ||
+       any(!is.finite(a[c(id2,id2+1L,id3)]))){
+      return(fallback())
+    }
     inc = (a[id3]-a[id2])/(id3-id2)
     a[id2:1] = a[id2+1]-inc*(1:id2)
   }
-  neg = which(1+2*r[ceiling(n/2):n]*b<=0 )
+  neg = which(1+2*r[ceiling(n/2):(n-1)]*b<=0 )
   if (nn.r>=(n-l1)){
     message(paste0('Zdiff: nn.r>=(n-l1), b:',b,'.'))
     id1 = min(neg+ceiling(n/2)-1,ceiling(n/2)-1)
     id2 = id1 - ceiling(0.03*n)
     id3 = id2 - ceiling(0.09*n)
+    if(id3 < 1L || id2 < 2L || id2 > length(ratio) ||
+       any(!is.finite(ratio[c(id3,id2-1L,id2)]))){
+      return(fallback())
+    }
     inc = (ratio[id3]-ratio[id2])/(id3-id2)
     ratio[id2:(n-1)] = ratio[id2-1]+inc*((id2:(n-1))-id2)
     ratio[ratio<0]=0
-    a = (b^2*x*Nu(sqrt(2*b^2*x)))^2 * ratio  ## this is different from single change-point alternative
+    right = seq.int(ceiling(n/2),n-1)
+    a[right] = ((b^2*x*Nu(sqrt(2*b^2*x)))^2 * ratio)[right]
   }
   neg2 = which(a<0)
   a[neg2] = 0
+  if(any(!is.finite(a[l0:l1]))){
+    return(fallback())
+  }
   integrand = function(s){
     a[s]*(n-s)   ## this is different from single change-point alternative
   }
-  result = try(2*dnorm(b)/b*integrate(integrand, l0, l1, subdivisions=3000, stop.on.error=FALSE)$value, silent=T)   ## this is different from single change-point alternative
-  if(result>1){
-    message('Zdiff after correction has p-value larger than 1. Set as the p-value without correction.')
-    result = pDR2(b, n, l0, l1)
+  result = tryCatch(2*dnorm(b)/b*integrate(integrand, l0, l1, subdivisions=3000, stop.on.error=FALSE)$value,
+                    error=function(e) NA_real_)
+  if(!is.finite(result) || result < 0 || result > 1){
+    return(fallback())
   }
   return(result)
 }
   
 ##Calculate the corrected p-value for Zw
 pI_correct_w <- function(n,b,r,x,l0,l1){
-  if (b<0){
+  if (b<=0){
     return(1)
   }
-  theta_b = rep(0,n-1)
+  fallback = function(){
+    message("Zw: p-value approximation without skewness correction is reported.")
+    pWR2(b,n,l0,l1)
+  }
+  theta_b = rep(NA_real_,n-1)
   pos = which(1+2*r*b>0)
-  theta_b[pos] = (sqrt((1+2*r*b)[pos])-1)/r[pos]
+  theta_b[pos] = 2*b/(1+sqrt((1+2*r*b)[pos]))
   ratio = exp((b-theta_b)^2/2 + r*theta_b^3/6)/sqrt(1+r*theta_b)
   a = (b^2*x*Nu(sqrt(2*b^2*x)))^2 * ratio  ## this is different from single change-point
   
-  a_na = which(is.na(a)==TRUE )
-  a[a_na] = 0
+  a[which(x==0)] = 0
   nn = n-1-length(pos)
   if (nn>0.75*n){
     message("Extrapolation of Zw for skewness-corrected p-value approximation could not be performed.")
@@ -682,23 +772,33 @@ pI_correct_w <- function(n,b,r,x,l0,l1){
   if (nn>=(l0-1)+(n-l1)){
     message(paste0('Zw: nn>=(l0-1)+(n-l1), b:',b,'.'))
     neg = which(1+2*r*b<=0)
-    dif = neg[2:nn]-neg[1:(nn-1)]
+    if(length(neg) < 2L){
+      return(fallback())
+    }
+    dif = diff(neg)
     id1 = which.max(dif)
     id2 = id1 + ceiling(0.03*n)
     id3 = id2 + ceiling(0.09*n)
+    if(id2+1L > length(a) || id3 > length(a) ||
+       any(!is.finite(a[c(id2,id2+1L,id3)]))){
+      return(fallback())
+    }
     inc = (a[id3]-a[id2])/(id3-id2)
     a[id2:1] = a[id2+1]-inc*(1:id2)
     a[(n/2+1):n] = a[(n/2):1]
-    neg2 = which(a<0 | is.na(a)==TRUE)
+    neg2 = which(a<0)
     a[neg2] = 0
+  }
+  if(any(!is.finite(a[l0:l1]))){
+    return(fallback())
   }
   integrand = function(s){
     a[s]*(n-s)
   }
-  result = try(dnorm(b)/b*integrate(integrand, l0, l1, subdivisions=3000, stop.on.error=FALSE)$value, silent=T)  ## this is different from single change-point alternative
-  if(result>1){
-    message('Zw after correction has p-value larger than 1. Set as the p-value without correction.')
-    result = pWR2(b, n, l0, l1)
+  result = tryCatch(dnorm(b)/b*integrate(integrand, l0, l1, subdivisions=3000, stop.on.error=FALSE)$value,
+                    error=function(e) NA_real_)
+  if(!is.finite(result) || result < 0 || result > 1){
+    return(fallback())
   }
   return(result)
 }
@@ -715,8 +815,10 @@ Rise_Rank<-function(S,method=c('overall','row')){
     R = R + t(R)
   }
   if(method=='row'){
-    diag(S) = min(S) - 100
-    R = t(apply(S, 1, rank)) - 1
+    dimnames(R) = dimnames(S)
+    for(i in seq_len(nrow(S))){
+      R[i,-i] = rank(S[i,-i],ties.method="average")
+    }
   }
   return(R)
 }

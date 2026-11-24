@@ -22,7 +22,9 @@ data matrix (default \code{"euclidean"}).}
 \item{n0, n1}{scan range (defaults \code{ceiling(0.05*n)} / \code{floor(0.95*n)};
 for \code{alternative = "interval"} these are the minimum / maximum interval
 lengths).}
-\item{pval.appr}{logical; compute analytic p-value approximations.}
+\item{pval.appr}{logical; compute analytic p-value approximations.
+Unavailable approximations, including those below the tail-range cutoff,
+are returned as \code{NA}. See \code{\link{rcpd}}.}
 \item{skew.corr}{logical; also compute the skewness-corrected approximation.}
 \item{B}{number of permutations for permutation p-values (\code{0} = none).}
 \item{alternative}{\code{"single"} (a single change-point) or \code{"interval"}
@@ -31,7 +33,8 @@ lengths).}
 \value{
 A list with \code{scanZ} (the WR / MR / TR statistics and estimated
 change-point(s)) and, as requested, \code{pval.appr} and \code{pval.perm}.
-See \code{\link{rcpd}}.
+For a changed interval, \code{tau = c(i, j)} identifies rows
+\code{(i + 1):j}. See \code{\link{rcpd}}.
 }
 \description{
 Convenience wrapper: builds the RING rank graph from the input (unless a rank

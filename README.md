@@ -16,7 +16,7 @@ Euclidean.
 ## Install
 ```r
 # from the built tarball
-install.packages("ringSeg_0.1.0.tar.gz", repos = NULL, type = "source")
+install.packages("ringSeg_0.1.1.tar.gz", repos = NULL, type = "source")
 # or from source dir:  R CMD INSTALL ringSeg
 ```
 
@@ -72,7 +72,7 @@ Inputs are checked with a consistent policy: coercible quirks are accepted with 
 
 | Input | Behaviour |
 |---|---|
-| `D` (distance) with **negative** entries | **warning**, proceeds -- `S = max(D) - D` still ranks, so a general (dis)similarity is allowed |
+| `D` (distance) with **negative** entries | **warning**, proceeds -- the raw distances still rank, so a general (dis)similarity is allowed |
 | `n0` / `n1` / `k` **non-integer** but in range | **warning**, rounded to the nearest integer |
 | `R` **not symmetric** | **warning**, symmetrized as `(R + t(R)) / 2` |
 | `n0` / `n1` outside `[0, n]`, or `k` outside `1..n-1` | **error** |
@@ -85,11 +85,16 @@ Diagnostic notes (e.g. the scan-range adjustment) are emitted via `message()`, s
 can be silenced with `suppressMessages()`.
 
 ## Notes on calibration
-The skewness-corrected analytic p-value (`*.cor`, the default) is well-calibrated at
-finite *n*; the uncorrected Gaussian/field approximation can be mildly
-anti-conservative for small *n*. For small samples, `B > 0` (permutation) is always
-available as an exact alternative. Permutation p-values use the add-one estimator
-`(#{perm >= obs} + 1) / (B + 1)`, so they are always strictly positive.
+Analytic p-values can be anti-conservative at finite sample sizes, especially
+when a candidate interval has few observations inside or outside. For
+significance decisions in these settings, request permutation p-values
+with B > 0 if the observations are exchangeable under the null.
+
+A fixed scan bound or a zero-variance component makes the analytic
+approximation unavailable. The package reports NA in that case.
+A zero-variance component contributes zero to observed and permuted
+statistics. For a statistic with no nonconstant component, the estimated
+location is NA.
 
 ## Maintainer / license
 Maintainer Hao Chen <hxchen@ucdavis.edu>. License `GPL (>= 2)`, matching the sibling

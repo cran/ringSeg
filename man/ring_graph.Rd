@@ -15,9 +15,12 @@ argument of \code{\link{rcpd}}.
 }
 \description{
 Constructs the sparse, rank-based k-nearest-neighbour graph that the RING
-statistics operate on -- RING's ranking scheme: rank each observation's
-neighbours within its row of the similarity \eqn{S = \max(D) - D}, keep the \code{k}
-nearest (weights \code{k}..1 from nearest to k-th), and symmetrize.
+statistics operate on. Rank each observation's neighbours by increasing
+distance, give the \code{k} nearest weights \code{k}..1 when the distances
+are distinct, and symmetrize. Tied neighbours share the mean of the
+weights at their positions, including zero weight beyond \code{k}.
+A tie at the cutoff can retain more than \code{k} neighbours. The sum of
+outgoing weights before symmetrization is \eqn{k(k+1)/2} for each node.
 }
 \examples{
 set.seed(1)
